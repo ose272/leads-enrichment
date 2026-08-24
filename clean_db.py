@@ -1,0 +1,10 @@
+import sqlite3
+conn = sqlite3.connect('c:/Users/HP/Desktop/AUTOMATION 1/leads.db')
+cursor = conn.cursor()
+cursor.execute('DELETE FROM leads WHERE id >= 396')
+cursor.execute("DELETE FROM processed_messages WHERE message_id LIKE '%LEADS_1%' OR message_id LIKE '%leads%1%'")
+conn.commit()
+print('Deleted bad leads')
+cursor.execute('SELECT COUNT(*) FROM leads')
+print('Remaining leads:', cursor.fetchone()[0])
+conn.close()
