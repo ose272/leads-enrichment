@@ -270,3 +270,174 @@ def generate_email_patterns(domain: str, first_name: str = "", last_name: str = 
         emails = patterns + emails
     
     return emails
+
+
+# =============================================================================
+# MAIN APP
+# =============================================================================
+
+def main():
+    st.title("📧 SE Global Lead Enrichment")
+    st.caption("Upload CSV with a **website** column → generate email patterns → download results")
+    
+    # Provider selector
+    provider_options = ["pattern-only (no API)"]
+    if HAS_GROQ and get_secret("GROQ_API_KEY"):
+        provider_options.append("groq")
+    if HAS_OPENAI and get_secret("OPENAI_API_KEY"):
+        provider_options.append("openai")
+    if HAS_ANTHROPIC and get_secret("ANTHROPIC_API_KEY"):
+        provider_options.append("anthropic")
+    
+    selected_provider = st.selectbox(
+        "LLM Provider (optional - enhances patterns)",
+        provider_options,
+        index=0,
+        help="Select a provider if you've added API keys to secrets. 'pattern-only' uses heuristics only."
+    )
+    
+    if selected_provider != "pattern-only (no API)":
+        st.session_state.llm_provider = selected_provider
+    else:
+        st.session_state.llm_provider = None
+    
+    st.divider()
+    
+    # File uploader
+    uploaded_file = st.file_uploader(
+        "Upload CSV file",
+        type=["csv"],
+        help="CSV must contain a 'website' column. Optional: 'company_name', 'first_name', 'last_name'"
+    )
+    
+    if uploaded_file is None:
+        st.info("👆 Upload a CSV file to begin")
+        return
+    
+    # Read and validate CSV
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"Failed to read CSV: {e}")
+        return
+    
+    is_valid, msg = validate_csv(df)
+    if not is_valid:
+        st.error(msg)
+        return
+    
+    st.success(f"✅ Loaded {len(df)} rows")
+    
+    # Show preview
+    with st.expander("📋 Preview input data", expanded=False):
+        st.dataframe(df.head(10), use_container_width=True)
+    
+    # Process button
+    if st.button("🚀 Generate Emails", type="primary", use_container_width=True):
+        process_leads(df, selected_provider)
+    
+    # Show results if already processed
+    if "results_df" in st.session_state:
+        display_results(st.session_state.results_df)
+
+
+def process_leads(df: pd.DataFrame, provider: str):
+    """Process leads and generate email patterns."""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    results = []
+    total = len(df)
+    
+    for idx, row in df.iterrows():
+        status_text.text(f"Processing {idx + 1}/{total}: {row.get('website', 'unknown')}")
+        
+        website = row.get("website", "")
+        company_name = row.get("company_name", "")
+        first_name = row.get("first_name", "")
+        last_name = row.get("last_name", "")
+        
+        domain = extract_domain(website)
+        if not domain:
+            results.append({
+                **row.to_dict(),
+                "domain": "",
+                "emails": [],
+                "email_count": 0,
+                "source": "invalid_domain"
+            })
+            progress_bar.progress((idx + 1) / total)
+            continue
+        
+        # Try LLM if provider selected
+        emails = []
+        source = "pattern"
+        if provider and provider != "pattern-only (no API)":
+            emails = extract_emails_with_llm(website, company_name)
+            if emails:
+                source = "llm"
+        
+        # Fallback to pattern generation
+        if not emails:
+            emails = generate_email_patterns(domain, first_name, last_name)
+            source = "pattern"
+        
+        results.append({
+            **row.to_dict(),
+            "domain": domain,
+            "emails": "; ".join(emails),
+            "email_count": len(emails),
+            "source": source
+        })
+        
+        progress_bar.progress((idx + 1) / total)
+    
+    status_text.text("✅ Complete!")
+    
+    results_df = pd.DataFrame(results)
+    st.session_state.results_df = results_df
+    st.rerun()
+
+
+def display_results(df: pd.DataFrame):
+    """Display results with download option."""
+    st.divider()
+    st.subheader("📊 Results")
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Leads", len(df))
+    with col2:
+        st.metric("With Emails", (df["email_count"] > 0).sum())
+    with col3:
+        llm_count = (df["source"] == "llm").sum()
+        pattern_count = (df["source"] == "pattern").sum()
+        st.metric("LLM / Pattern", f"{llm_count} / {pattern_count}")
+    
+    # Display table
+    display_cols = [c for c in df.columns if c not in ["emails"]]
+    # Move domain, email_count, source near front
+    priority_cols = ["domain", "email_count", "source"]
+    other_cols = [c for c in display_cols if c not in priority_cols]
+    ordered_cols = priority_cols + other_cols
+    
+    st.dataframe(
+        df[ordered_cols],
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    # Download button
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Download Results as CSV",
+        data=csv,
+        file_name="enriched_leads.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+
+if __name__ == "__main__":
+    main()
