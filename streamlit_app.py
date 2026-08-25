@@ -86,27 +86,14 @@ button[kind="secondary"] { min-height: 44px; font-size: 16px; }
 </style>
 """, unsafe_allow_html=True)
 
-# PWA manifest for "Add to Home Screen" (injected via meta tags)
+# PWA manifest for "Add to Home Screen" (served as static file from repo root)
 st.markdown("""
-<link rel="manifest" href="data:application/manifest+json,{
-  \"name\": \"SE Global Lead Enrichment\",
-  \"short_name\": \"Lead Enrich\",
-  \"description\": \"Upload CSV, enrich emails, download results\",
-  \"start_url\": \".\",
-  \"display\": \"standalone\",
-  \"background_color\": \"#ffffff\",
-  \"theme_color\": \"#ff4b4b\",
-  \"icons\": [{
-    \"src\": \"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📧</text></svg>\",
-    \"sizes\": \"192x192\",
-    \"type\": \"image/svg+xml\"
-  }]
-}">
-<meta name=\"theme-color\" content=\"#ff4b4b\">
-<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">
-<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"default\">
-<meta name=\"apple-mobile-web-app-title\" content=\"Lead Enrich\">
-<link rel=\"apple-touch-icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📧</text></svg>\">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#ff4b4b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Lead Enrich">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📧</text></svg>">
 """, unsafe_allow_html=True)
 
 # Load secrets (works both locally with .streamlit/secrets.toml and on Streamlit Cloud)
