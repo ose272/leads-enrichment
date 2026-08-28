@@ -1,0 +1,94 @@
+name: Daily Outreach Automation
+
+on:
+  schedule:
+    # Runs every day at 9:00 AM UTC
+    - cron: '0 9 * * *'
+  
+  # Also allow manual triggering
+  workflow_dispatch:
+
+jobs:
+  daily-outreach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-cache
+          restore-keys: |
+            pip-cache-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run daily outreach cycle
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SENDER_NAME: ${{ secrets.SENDER_NAME }}
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_PORT: ${{ secrets.IMAP_PORT }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          IMAP_DRAFTS_FOLDER: ${{ secrets.IMAP_DRAFTS_FOLDER }}
+          IMAP_PROCESSED_FOLDER: ${{ secrets.IMAP_PROCESSED_FOLDER }}
+          DRY_RUN: 'false'
+          LOG_LEVEL: 'INFO'
+          DAILY_EMAIL_CAP: '100'
+        run: |
+          python -m src.main --mode daily --db outreach.db
+      
+      - name: Upload outreach database as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: outreach-database
+          path: outreach.db
+          retention-days: 30
+      
+      - name: Generate weekly report on Sundays
+        if: github.event_name == 'schedule' && github.event.schedule == '0 9 * * 0'
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SENDER_NAME: ${{ secrets.SENDER_NAME }}
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_PORT: ${{ secrets.IMAP_PORT }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          IMAP_DRAFTS_FOLDER: ${{ secrets.IMAP_DRAFTS_FOLDER }}
+          IMAP_PROCESSED_FOLDER: ${{ secrets.IMAP_PROCESSED_FOLDER }}
+          DRY_RUN: 'false'
+          LOG_LEVEL: 'INFO'
+          DAILY_EMAIL_CAP: '100'
+        run: |
+          python -m src.main --mode report --db outreach.db
+      
+      - name: Upload weekly report
+        if: github.event_name == 'schedule' && github.event.schedule == '0 9 * * 0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-report
+          path: |
+            weekly_report.csv
+            weekly_report.html
+          retention-days: 90
