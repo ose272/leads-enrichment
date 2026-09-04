@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import smtplib
 import time
 import uuid
@@ -13,6 +14,21 @@ from typing import Any
 
 OPTOUT_TERMS = ("stop", "unsubscribe", "not interested", "remove me", "do not contact")
 HANDOFF_MESSAGE = "Great to hear it. Let's continue on WhatsApp so we can move faster: +234 915 931 3103."
+OUTREACH_SIGN_OFF = "Regards,\nStephen\nOSETEK ltd."
+OUTREACH_SUBJECT = "YOU NEED TO HEAR THIS"
+
+
+def format_outreach_body(body: str) -> str:
+    """Remove unresolved placeholders and enforce the operator's sign-off."""
+    lines = (body or "").strip().splitlines()
+    if lines and re.match(r"(?i)^(hi|hello|dear)\s+\[[^\]]+\]\s*,?$", lines[0].strip()):
+        lines[0] = "Hi,"
+    cleaned = "\n".join(lines).strip()
+    cleaned = re.sub(r"(?im)^\s*(best|best regards|kind regards|regards),?\s*$", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*(SE Global|Stephen|Stephen OSETEK|OSETEK ltd\.?)\s*$", "", cleaned)
+    cleaned = re.sub(r"\[[^\]]+\]", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return f"{cleaned}\n\n{OUTREACH_SIGN_OFF}"
 
 
 def contains_opt_out(message: str) -> bool:
@@ -41,12 +57,12 @@ class SmtpSender:
         message = EmailMessage()
         message["From"] = f"{os.getenv('SENDER_NAME', 'SE Global')} <{os.environ['SMTP_USER']}>"
         message["To"] = recipient
-        message["Subject"] = subject
+        message["Subject"] = OUTREACH_SUBJECT
         message["Message-ID"] = message_id
         if in_reply_to:
             message["In-Reply-To"] = in_reply_to
             message["References"] = in_reply_to
-        message.set_content(body + "\n\nReply STOP to opt out any time.")
+        message.set_content(format_outreach_body(body))
         if self.dry_run:
             print(f"DRY RUN: would send to {recipient}: {subject}")
         else:

@@ -21,11 +21,11 @@ class LLMCallError(Exception):
 class GroqClient:
     """Wrapper for Groq API with error handling and retries."""
     
-    def __init__(self, api_key: str = None, model: str = "llama-3.3-70b-versatile"):
+    def __init__(self, api_key: str = None, model: str = None):
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
         if not self.api_key:
             raise ValueError("GROQ_API_KEY not found in environment variables")
-        self.model = model
+        self.model = model or os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
         self.client = Groq(api_key=self.api_key)
     
     def generate(self, prompt: str, max_tokens: int = 500, temperature: float = 0.7) -> str:

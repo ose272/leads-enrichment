@@ -8,6 +8,14 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+if __package__ in (None, ""):
+    import os
+    import sys
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
 from src.tracker import LeadStore
 from src.mailer import send_email
 

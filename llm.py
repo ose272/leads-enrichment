@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 
 
 PROMPTS = {
-    "pitch": """You are writing a first-touch cold email for SE Global, an AI automation company. Given this lead's business summary: {summary}. Pitch how AI automation could specifically help a business like theirs. Keep it under 150 words, warm but professional, one clear call to action (reply to this email if interested). Do not overclaim results. Output only the email body.""",
+    "pitch": """You are writing a first-touch cold email for OSETEK ltd., an AI automation company. Use this foundation and adapt it naturally to the lead's business summary: {summary}. Explain that AI can help the business handle more customers, enquiries, and repetitive tasks without constantly adding staff; respond faster, operate more efficiently, and save time. Keep it under 150 words, warm and clear, without inventing facts or overclaiming. Start with "Hi," or "Hi there," when no first name is explicitly provided. Include a direct WhatsApp call to action using the configured link. End exactly with:\nRegards,\nStephen\nOSETEK ltd.\nOutput only the email body.""",
     "intent": "Classify this reply as exactly one of: curious, objecting, ready-to-talk, neutral. Reply: {reply}",
     "reply": "Write a warm, honest reply under 120 words to this lead message. Address the specific question without overclaiming and invite a next step. Message: {reply}",
     "report": "Given these outreach metrics: {stats}. Write a concise performance summary and suggest 2-3 concrete improvements for next week.",

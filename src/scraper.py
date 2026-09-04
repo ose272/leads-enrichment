@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 LOGGER = logging.getLogger("scraper")
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+INVALID_EMAIL_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".css", ".js"}
 
 CONTACT_PATHS = [
     "/contact", "/contact-us", "/about", "/about-us", 
@@ -49,6 +50,10 @@ def retry(max_attempts: int = 3, backoff: float = 2.0):
                     return func(*args, **kwargs)
                 except Exception as e:
                     last_exception = e
+                    if isinstance(e, requests.exceptions.HTTPError):
+                        status_code = e.response.status_code if e.response is not None else None
+                        if status_code is not None and 400 <= status_code < 500 and status_code not in (408, 429):
+                            raise
                     if attempt < max_attempts - 1:
                         wait_time = backoff ** attempt
                         LOGGER.warning(
@@ -62,7 +67,7 @@ def retry(max_attempts: int = 3, backoff: float = 2.0):
 
 
 @rate_limited
-@retry(max_attempts=3, backoff=2.0)
+@retry(max_attempts=2, backoff=1.0)
 def _fetch_page(url: str, timeout: int = 10) -> str:
     """Fetch a single page with proper headers and timeout."""
     headers = {
@@ -77,14 +82,19 @@ def _fetch_page(url: str, timeout: int = 10) -> str:
 
 def _extract_emails_from_html(html: str) -> set[str]:
     """Extract all email addresses from HTML content."""
-    emails = set(EMAIL_RE.findall(html))
+    emails = {
+        email.lower()
+        for email in EMAIL_RE.findall(html)
+        if not email.lower().endswith(tuple(INVALID_EMAIL_SUFFIXES))
+        and not email.startswith("%")
+    }
     
     soup = BeautifulSoup(html, "html.parser")
     for link in soup.find_all("a", href=True):
         href = link["href"]
         if href.startswith("mailto:"):
             email = href[7:].split("?")[0].strip()
-            if EMAIL_RE.match(email):
+            if EMAIL_RE.match(email) and not email.lower().endswith(tuple(INVALID_EMAIL_SUFFIXES)):
                 emails.add(email.lower())
     
     return emails
@@ -194,4 +204,3 @@ def scrape_website_content(url: str) -> tuple[str, list[str]]:
 class ScrapeError(Exception):
     """Custom exception for scraping failures."""
     pass
-

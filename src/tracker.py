@@ -19,7 +19,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 LOGGER = logging.getLogger("tracker")
@@ -77,9 +77,15 @@ class LeadStore:
 
         with self._get_connection() as conn:
             # Check if already exists
-            existing = conn.execute(
-                "SELECT id FROM leads WHERE website = ?", (website,)
-            ).fetchone()
+            if contact_email:
+                existing = conn.execute(
+                    "SELECT id FROM leads WHERE website = ? AND contact_email = ?",
+                    (website, contact_email.strip().lower()),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT id FROM leads WHERE website = ?", (website,)
+                ).fetchone()
             if existing:
                 return existing["id"]
 
@@ -159,8 +165,8 @@ class LeadStore:
     def get_weekly_activity(self, days: int = 7) -> dict[str, Any]:
         """Get activity stats for the past N days."""
         with self._get_connection() as conn:
-            since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            since = since.replace(day=since.day - days).isoformat()
+            since = (datetime.now(timezone.utc) - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+            since = since.isoformat()
 
             stats = {}
             stats["new_leads"] = conn.execute(
@@ -203,18 +209,15 @@ class LeadStore:
         
         Args:
             days: Number of days since last contact
-            
+             
         Returns:
             List of leads eligible for follow-up
         """
         with self._get_connection() as conn:
             # Calculate cutoff date
-            from datetime import datetime, timezone, timedelta
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             cutoff_str = cutoff.isoformat()
-            
-            # Get leads in 'sent' status older than specified days with no reply
-            # and follow_up_count < 2 (max 2 follow-ups)
+
             rows = conn.execute(
                 """
                 SELECT * FROM leads 
@@ -227,8 +230,41 @@ class LeadStore:
                 """,
                 (cutoff_str,)
             ).fetchall()
-            
+
             return [self._row_to_lead(row) for row in rows]
+
+    def get_leads_by_email(self, email: str) -> list[Lead]:
+        """Return leads matching a contact email."""
+        if not email:
+            return []
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM leads WHERE contact_email = ? ORDER BY created_at", (email,)).fetchall()
+            return [self._row_to_lead(row) for row in rows]
+
+    def update_lead(
+        self,
+        lead_id: int,
+        status: str = None,
+        last_reply: str = None,
+        follow_up_date: str = None,
+    ) -> None:
+        """Update a lead with a minimal set of fields used by reply processing."""
+        with self._get_connection() as conn:
+            updates = []
+            params = []
+            if status is not None:
+                updates.append("status = ?")
+                params.append(status)
+            if last_reply is not None:
+                updates.append("reply_text = ?")
+                params.append(last_reply)
+            if follow_up_date is not None:
+                updates.append("last_contacted_date = ?")
+                params.append(follow_up_date)
+            if not updates:
+                return
+            params.append(lead_id)
+            conn.execute(f"UPDATE leads SET {', '.join(updates)} WHERE id = ?", params)
 
     def _row_to_lead(self, row: sqlite3.Row) -> Lead:
         return Lead(

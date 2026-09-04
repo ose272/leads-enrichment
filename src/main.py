@@ -1,7 +1,7 @@
 """Main orchestration module for the Outreach Agent.
 
 Modes:
-- --mode daily: Run daily outreach cycle (scrape, draft, send, check replies, follow-ups)
+- --mode daily: Run daily outreach cycle (scrape, draft, send, report)
 - --mode report: Generate weekly report
 - --mode scrape: Only scrape emails for new leads
 - --mode upload: Upload CSV of websites
@@ -12,15 +12,21 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from typing import Optional
 
 from dotenv import load_dotenv
 
+if __package__ in (None, ""):
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
 from src.tracker import LeadStore
 from src.scraper import scrape_email, scrape_website_content
-from src.drafter import draft_email, draft_followup
-from src.mailer import send_email, check_replies
+from src.drafter import draft_email
+from src.mailer import send_email
 from src.reporter import run_weekly_report
 
 # Load environment variables
@@ -33,6 +39,17 @@ logging.basicConfig(
 )
 
 LOGGER = logging.getLogger("main")
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+INVALID_EMAIL_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".css", ".js")
+
+
+def is_sendable_email(value: str) -> bool:
+    email = (value or "").strip()
+    return bool(
+        EMAIL_PATTERN.fullmatch(email)
+        and not email.lower().endswith(INVALID_EMAIL_SUFFIXES)
+        and not email.startswith("%")
+    )
 
 
 def load_csv(filepath: str, store: LeadStore) -> int:
@@ -53,33 +70,40 @@ def load_csv(filepath: str, store: LeadStore) -> int:
     
     df = pd.read_csv(filepath)
     
-    if "website" not in df.columns:
-        LOGGER.error("CSV must have a 'website' column")
+    website_column = next((column for column in df.columns if column.lower().strip() in ("website", "url")), None)
+    email_column = next((column for column in df.columns if column.lower().strip() in ("email", "contact_email")), None)
+    if website_column is None and email_column is None:
+        LOGGER.error("CSV must have a 'website' or 'email' column")
         return 0
     
     # Clean and validate URLs
-    websites = df["website"].dropna().astype(str).str.strip().str.lower()
-    websites = websites[websites != ""]
-    
-    # Add https:// if missing
     def normalize_url(url: str) -> str:
         if not url.startswith(("http://", "https://")):
             return "https://" + url
         return url
-    
-    websites = websites.apply(normalize_url)
-    websites = websites.drop_duplicates()
-    
+
     added = 0
-    for website in websites:
+    unique_websites = set()
+    for _, row in df.iterrows():
+        website_value = str(row.get(website_column, "")).strip() if website_column else ""
+        email_value = str(row.get(email_column, "")).strip().lower() if email_column else ""
+        if not website_value and email_value and "@" in email_value:
+            website_value = email_value.rsplit("@", 1)[1]
+        if not website_value:
+            continue
+        website = normalize_url(website_value.lower())
+        unique_key = f"{website}|{email_value}" if email_column and email_value else website
+        if unique_key in unique_websites:
+            continue
+        unique_websites.add(unique_key)
         try:
-            lead_id = store.add_lead(website)
+            lead_id = store.add_lead(website, email_value if is_sendable_email(email_value) else "")
             if lead_id:
                 added += 1
         except Exception as e:
             LOGGER.warning("Failed to add %s: %s", website, e)
     
-    LOGGER.info("Loaded CSV: %d new leads added from %d unique websites", added, len(websites))
+    LOGGER.info("Loaded CSV: %d new leads added from %d unique websites", added, len(unique_websites))
     return added
 
 
@@ -105,8 +129,13 @@ def run_scrape_phase(store: LeadStore) -> int:
                 LOGGER.info("Found email for %s: %s", lead.website, email)
             else:
                 # No email found, but we have context
-                store.update_status(lead.id, "scraped", notes=summary[:500])
-                LOGGER.info("No email found for %s, but got context", lead.website)
+                if lead.contact_email:
+                    summary = summary or f"Business website: {lead.website}. Contact email: {lead.contact_email}."
+                    store.update_status(lead.id, "scraped", notes=summary[:500])
+                    LOGGER.info("Using supplied email for %s", lead.website)
+                else:
+                    store.update_status(lead.id, "scraped", notes=summary[:500])
+                    LOGGER.info("No email found for %s, but got context", lead.website)
             
             scraped += 1
             
@@ -165,7 +194,8 @@ def run_send_phase(store: LeadStore) -> int:
     sent = 0
     
     for lead in leads:
-        if not lead.contact_email:
+        if not is_sendable_email(lead.contact_email):
+            LOGGER.warning("Skipping invalid email for lead %d: %s", lead.id, lead.contact_email)
             continue
         
         # Parse subject and body from notes
@@ -188,9 +218,10 @@ def run_send_phase(store: LeadStore) -> int:
             success = send_email(lead.contact_email, subject, body)
             
             if success:
-                store.update_status(lead.id, "sent")
+                sent_status = "dry_run" if os.getenv("DRY_RUN", "true").lower() == "true" else "sent"
+                store.update_status(lead.id, sent_status)
                 sent += 1
-                LOGGER.info("Sent email to %s", lead.contact_email)
+                LOGGER.info("%s email to %s", "Simulated" if sent_status == "dry_run" else "Sent", lead.contact_email)
             else:
                 LOGGER.error("Failed to send email to %s", lead.contact_email)
                 
@@ -213,26 +244,40 @@ def run_followup_phase(store: LeadStore) -> int:
     for lead in leads:
         if not lead.contact_email:
             continue
-            
+
         LOGGER.info("Sending follow-up to %s (%s)", lead.contact_email, lead.website)
-        
+
         try:
-            followup = draft_followup(lead.website, lead.notes or "")
-            
+            notes = lead.notes or ""
+            subject = f"Follow up: {lead.website}"
+            previous_body = ""
+            if notes:
+                note_lines = notes.splitlines()
+                if note_lines and note_lines[0].startswith("Subject: "):
+                    subject = note_lines[0][9:].strip()
+                    if len(note_lines) > 1:
+                        previous_body = "\n".join(note_lines[1:]).strip()
+                else:
+                    previous_body = notes
+
+            followup_number = (lead.follow_up_count or 0) + 1
+            followup = draft_followup(lead.website, subject, previous_body, followup_number)
+
             if followup:
+                status = "follow_up_1" if followup_number == 1 else "follow_up_2"
                 success = send_email(lead.contact_email, followup.subject, followup.body)
                 if success:
-                    store.update_status(lead.id, "followup_sent")
+                    store.update_status(lead.id, status)
                     sent += 1
                     LOGGER.info("Sent follow-up to %s", lead.contact_email)
                 else:
                     LOGGER.error("Failed to send follow-up to %s", lead.contact_email)
             else:
                 LOGGER.warning("Failed to draft follow-up for lead %d", lead.id)
-                
+
         except Exception as e:
             LOGGER.error("Error sending follow-up to %s: %s", lead.contact_email, e)
-    
+
     return sent
 
 
@@ -255,12 +300,6 @@ def run_daily_cycle(store: LeadStore) -> dict[str, int]:
     # Phase 3: Send emails
     results["sent"] = run_send_phase(store)
     
-    # Phase 4: Check replies
-    results["replies_processed"] = check_replies(store)
-    
-    # Phase 5: Send follow-ups
-    results["followups_sent"] = run_followup_phase(store)
-    
     LOGGER.info("Daily cycle complete: %s", results)
     return results
 
@@ -268,15 +307,15 @@ def run_daily_cycle(store: LeadStore) -> dict[str, int]:
 def main():
     """Main entry point with command-line argument parsing."""
     parser = argparse.ArgumentParser(description="Outreach Agent - Automated cold outreach")
-    parser.add_argument("--mode", choices=["daily", "report", "scrape", "upload"], required=True,
+    parser.add_argument("--mode", choices=["daily", "report", "scrape", "upload", "full"], required=True,
                         help="Mode to run")
-    parser.add_argument("--csv", help="CSV file path for upload mode")
+    parser.add_argument("--csv", help="CSV file path for upload/full mode")
     parser.add_argument("--db", default="outreach.db", help="Database file path")
-    
+
     args = parser.parse_args()
-    
+
     store = LeadStore(args.db)
-    
+
     try:
         if args.mode == "upload":
             if not args.csv:
@@ -284,19 +323,29 @@ def main():
                 sys.exit(1)
             count = load_csv(args.csv, store)
             print(f"Added {count} new leads")
-            
+
         elif args.mode == "scrape":
             count = run_scrape_phase(store)
             print(f"Scraped {count} leads")
-            
+
         elif args.mode == "daily":
             results = run_daily_cycle(store)
             print(f"Daily cycle complete: {results}")
-            
+
         elif args.mode == "report":
-            run_weekly_report(store)
-            print("Weekly report generated")
-            
+            report = run_weekly_report(store)
+            print(f"Weekly report generated: {report}")
+
+        elif args.mode == "full":
+            if not args.csv:
+                LOGGER.error("--csv required for full mode")
+                sys.exit(1)
+            added = load_csv(args.csv, store)
+            LOGGER.info("Loaded %d leads from CSV", added)
+            results = run_daily_cycle(store)
+            report = run_weekly_report(store)
+            print(f"Full cycle complete: added={added}, results={results}, report={report}")
+
     finally:
         store.close()
 

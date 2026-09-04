@@ -42,3 +42,15 @@ Optional: company, first_name, last_name
 
 ## License
 MIT
+
+## Operations dashboard and manual
+
+Run the operator dashboard with:
+
+```bash
+streamlit run operations_dashboard.py
+```
+
+The dashboard accepts CSV files containing either `website` or `email`, limits saved runs to a daily batch of up to 70 leads, shows scraping and delivery metrics, and displays the automation log. The active workflow is scraping, drafting, sending, and reporting; reply management and follow-ups are disabled. Keep live mode disabled until the batch has been reviewed.
+
+The full operator instructions are in [SE_Global_Outreach_Operations_Manual.pdf](SE_Global_Outreach_Operations_Manual.pdf).

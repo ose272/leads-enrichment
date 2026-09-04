@@ -23,7 +23,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from storage import LeadStore, Settings, load_env_file
 from llm import Ollama
-from outreach import SmtpSender, contains_opt_out, HANDOFF_MESSAGE
+from outreach import SmtpSender, contains_opt_out, HANDOFF_MESSAGE, format_outreach_body
 from pipeline import enrich_new_leads, classify_inbound, due_followup_status
 from scraper import enrich_website
 
@@ -80,7 +80,7 @@ class OutreachService:
         for lead in leads:
             try:
                 summary = lead["scraped_summary"] or f"Company: {lead['company'] or 'Unknown'}"
-                pitch = self.llm.generate_pitch_email(summary)
+                pitch = format_outreach_body(self.llm.generate_pitch_email(summary))
 
                 subject = f"AI automation for {lead['company'] or 'your business'}"
                 if lead["first_name"]:
