@@ -1,10 +1,10 @@
 """
-Streamlit Cloud-Compatible Lead Enrichment Dashboard
-====================================================
-Upload CSV of leads (with website column) → enrich with emails → download results.
+Streamlit Cloud-Compatible Lead Enrichment & Outreach Pipeline
+===============================================================
+Complete 7-phase pipeline: Import → Enrich → Outreach → Replies → Follow-ups → Report → Settings
 
 Constraints for Streamlit Cloud:
-- No persistent SQLite (uses in-memory pandas DataFrames)
+- No persistent SQLite (uses in-memory pandas DataFrames + session state)
 - No background jobs / APScheduler
 - No local Ollama (uses cloud LLM API via st.secrets)
 - No SMTP/IMAP (email compose preview only, no sending)
@@ -17,8 +17,13 @@ Deploy: Push to GitHub → connect at share.streamlit.io
 import io
 import csv
 import re
+import json
 import time
-from typing import Optional
+import hashlib
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 
 import pandas as pd
 import streamlit as st
@@ -48,14 +53,14 @@ except ImportError:
 # =============================================================================
 
 st.set_page_config(
-    page_title="SE Global Lead Enrichment",
+    page_title="SE Global Lead Pipeline",
     page_icon="📧",
     layout="wide",
-    initial_sidebar_state="collapsed",  # Collapsed on mobile for more screen space
+    initial_sidebar_state="expanded",
     menu_items={
         "Get Help": "https://github.com/YOUR_USERNAME/YOUR_REPO/issues",
         "Report a bug": "https://github.com/YOUR_USERNAME/YOUR_REPO/issues",
-        "About": "SE Global Lead Enrichment — CSV upload, email enrichment, download results",
+        "About": "SE Global Lead Pipeline — Full enrichment to outreach workflow",
     },
 )
 
@@ -83,27 +88,100 @@ button[kind="secondary"] { min-height: 44px; font-size: 16px; }
 
 /* Prevent horizontal scroll on mobile */
 .main { overflow-x: hidden; }
+
+/* Status badge styling */
+.status-badge {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.status-new { background: #e0e7ff; color: #3730a3; }
+.status-enriched { background: #dcfce7; color: #166534; }
+.status-no_email { background: #fee2e2; color: #991b1b; }
+.status-emailed { background: #dbeafe; color: #1e40af; }
+.status-replied { background: #e0e7ff; color: #3730a3; }
+.status-curious { background: #fef3c7; color: #92400e; }
+.status-objecting { background: #fee2e2; color: #991b1b; }
+.status-ready { background: #dcfce7; color: #166534; }
+.status-unsubscribed { background: #f3f4f6; color: #374151; }
+.status-bounced { background: #fce7f3; color: #9d174d; }
+
+/* Tab styling */
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+    height: 50px;
+    padding: 0 16px;
+    background: #f8fafc;
+    border-radius: 8px 8px 0 0;
+    font-weight: 500;
+}
+.stTabs [aria-selected="true"] {
+    background: #ffffff;
+    border-bottom: 3px solid #ff4b4b;
+}
+
+/* Metric cards in sidebar */
+.sidebar-metric {
+    background: #f8fafc;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 8px;
+    border: 1px solid #e2e8f0;
+}
+.sidebar-metric-label { font-size: 0.75rem; color: #64748b; text-transform: uppercase; }
+.sidebar-metric-value { font-size: 1.5rem; font-weight: 700; color: #1e293b; }
+
+/* Conversation log */
+.conversation-entry {
+    padding: 8px 12px;
+    margin: 4px 0;
+    border-radius: 6px;
+    font-size: 0.875rem;
+}
+.conversation-outbound { background: #dbeafe; border-left: 3px solid #3b82f6; }
+.conversation-inbound { background: #dcfce7; border-left: 3px solid #22c55e; }
+.conversation-internal { background: #f3f4f6; border-left: 3px solid #6b7280; }
+
+/* Progress steps */
+.step-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f8fafc;
+    border-radius: 8px;
+    margin: 4px 0;
+}
+.step-active { background: #dbeafe; color: #1e40af; }
+.step-complete { background: #dcfce7; color: #166534; }
+.step-pending { background: #f3f4f6; color: #6b7280; }
 </style>
 """, unsafe_allow_html=True)
 
-# PWA manifest for "Add to Home Screen" (served as static file from repo root)
+# PWA manifest for "Add to Home Screen"
 st.markdown("""
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#ff4b4b">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Lead Enrich">
+<meta name="apple-mobile-web-app-title" content="Lead Pipeline">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📧</text></svg>">
 """, unsafe_allow_html=True)
 
-# Load secrets (works both locally with .streamlit/secrets.toml and on Streamlit Cloud)
+
+# =============================================================================
+# SECRETS HELPER
+# =============================================================================
+
 def get_secret(key: str, default: str = "") -> str:
     """Get secret from st.secrets or environment variable."""
     try:
         return st.secrets.get(key, default)
     except Exception:
-        import os
-        return os.getenv(key, default)
+        return default
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================

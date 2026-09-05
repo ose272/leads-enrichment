@@ -182,14 +182,12 @@ class ReplyChecker:
         LOGGER.info("Reply from %s classified as: %s", from_email, sentiment)
         
         if sentiment == "positive":
-            self.store.update_lead(lead.id, status="replied", last_reply=reply_text, 
-                                  follow_up_date=None)
+            self.store.update_status(lead.id, "replied", reply_text=reply_text, reply_sentiment="positive")
             self._send_handoff(lead)
         elif sentiment == "negative":
-            self.store.update_lead(lead.id, status="closed", last_reply=reply_text,
-                                  follow_up_date=None)
+            self.store.update_status(lead.id, "closed", reply_text=reply_text, reply_sentiment="negative")
         else:  # neutral
-            self.store.update_lead(lead.id, status="replied", last_reply=reply_text)
+            self.store.update_status(lead.id, "replied", reply_text=reply_text, reply_sentiment="neutral")
         
         client.add_flags(msg_id, ['\\Seen'])
     

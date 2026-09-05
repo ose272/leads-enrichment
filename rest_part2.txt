@@ -1,0 +1,153 @@
+with tab3:
+        st.subheader("Export Data")
+        
+        df = load_leads_df()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Download All Leads (CSV)",
+                data=csv,
+                file_name=f"leads_export_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with col2:
+            statuses = st.multiselect("Filter by status", df['status'].unique().tolist())
+            if statuses:
+                filtered = df[df['status'].isin(statuses)]
+                csv = filtered.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    f"📥 Download Filtered ({len(filtered)} leads)",
+                    data=csv,
+                    file_name=f"leads_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+elif page == "⚙️ Actions":
+    st.header("⚙️ Manual Actions & System Controls")
+    
+    st.warning("⚠️ These actions run the actual outreach pipeline phases. Use with real credentials.")
+    
+    store = get_store()
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Individual Phases")
+        
+        if st.button("🔍 Scrape Emails", use_container_width=True):
+            with st.spinner("Scraping websites for emails..."):
+                result = run_scrape_phase(store)
+                st.success(f"Scraped {result} new emails")
+                st.cache_data.clear()
+                st.rerun()
+        
+        if st.button("✍️ Draft Emails", use_container_width=True):
+            with st.spinner("Drafting emails with LLM..."):
+                result = run_draft_phase(store)
+                st.success(f"Drafted {result} emails")
+                st.cache_data.clear()
+                st.rerun()
+        
+        if st.button("📤 Send Emails", use_container_width=True):
+            with st.spinner("Sending emails via SMTP..."):
+                result = run_send_phase(store)
+                st.success(f"Sent {result} emails")
+                st.cache_data.clear()
+                st.rerun()
+        
+        if st.button("📬 Check Replies", use_container_width=True):
+            with st.spinner("Checking IMAP for replies..."):
+                result = run_reply_phase(store)
+                st.success(f"Processed {result} replies")
+                st.cache_data.clear()
+                st.rerun()
+        
+        if st.button("🔄 Send Follow-ups", use_container_width=True):
+            with st.spinner("Sending follow-ups..."):
+                result = run_followup_phase(store)
+                st.success(f"Sent {result} follow-ups")
+                st.cache_data.clear()
+                st.rerun()
+        
+        if st.button("📊 Generate Report", use_container_width=True):
+            with st.spinner("Generating weekly report..."):
+                result = run_report_phase(store)
+                st.success("Report generated!")
+                st.cache_data.clear()
+                st.rerun()
+    
+    with col2:
+        st.subheader("Full Daily Cycle")
+        
+        if st.button("🚀 RUN FULL DAILY CYCLE", type="primary", use_container_width=True):
+            with st.spinner("Running full daily outreach cycle..."):
+                progress = st.progress(0)
+                status = st.empty()
+                
+                phases = [
+                    ("Scraping emails...", run_scrape_phase),
+                    ("Drafting emails...", run_draft_phase),
+                    ("Sending emails...", run_send_phase),
+                    ("Checking replies...", run_reply_phase),
+                    ("Sending follow-ups...", run_followup_phase),
+                ]
+                
+                results = {}
+                for i, (msg, func) in enumerate(phases):
+                    status.text(msg)
+                    try:
+                        results[msg] = func(store)
+                    except Exception as e:
+                        results[msg] = f"Error: {e}"
+                    progress.progress((i + 1) / len(phases))
+                
+                status.text("✅ Daily cycle complete!")
+                
+                st.json(results)
+                st.cache_data.clear()
+                st.rerun()
+        
+        st.divider()
+        
+        st.subheader("System Info")
+        
+        conn = get_connection()
+        db_size = Path(DB_PATH).stat().st_size / 1024
+        st.write(f"**Database:** {DB_PATH} ({db_size:.1f} KB)")
+        
+        table_counts = {}
+        for table in ['leads', 'scrape_log']:
+            try:
+                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                table_counts[table] = count
+            except:
+                table_counts[table] = 0
+        
+        st.write(f"**Leads table:** {table_counts.get('leads', 0)} rows")
+        st.write(f"**Scrape log:** {table_counts.get('scrape_log', 0)} rows")
+        
+        conn.close()
+        
+        st.subheader("Environment Check")
+        import os
+        env_vars = [
+            'GROQ_API_KEY', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER',
+            'IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'SENDER_EMAIL', 'WHATSAPP_LINK'
+        ]
+        
+        for var in env_vars:
+            value = os.getenv(var)
+            status = "✅ Set" if value else "❌ Missing"
+            if value and var.endswith(('_KEY', '_PASSWORD', '_PASS')):
+                display = value[:4] + "****" + value[-4:] if len(value) > 8 else "****"
+            else:
+                display = value or ""
+            st.write(f"**{var}:** {status} {display}")
+
+# Footer
+st.divider()
+st.caption(f"SE Global Outreach Dashboard • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} • DB: {DB_PATH}")

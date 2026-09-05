@@ -2,15 +2,21 @@
 
 Provides LeadStore for SQLite persistence with the schema:
 - id: integer primary key
-- website: text
+- website: text (store URL)
 - contact_email: text
-- status: text (new/scraped/drafted/sent/replied/follow_up_1/follow_up_2/closed)
+- store_name: text (Shopify store name)
+- owner_name: text (store owner name)
+- status: text (new/drafted/sent/replied/follow_up_1/follow_up_2/closed/closed_handoff/no_email)
 - first_contacted_date: text (ISO format)
 - last_contacted_date: text (ISO format)
 - follow_up_count: integer default 0
 - reply_text: text
 - reply_sentiment: text (positive/neutral/negative)
 - notes: text
+- last_email_subject: text
+- last_email_body: text
+- paraphrase_seed: integer (for tracking email variations)
+- created_at: text (ISO format)
 """
 
 from __future__ import annotations
@@ -31,6 +37,8 @@ class Lead:
     id: Optional[int]
     website: str
     contact_email: str
+    store_name: str
+    owner_name: str
     status: str
     first_contacted_date: Optional[str]
     last_contacted_date: Optional[str]
@@ -38,6 +46,12 @@ class Lead:
     reply_text: Optional[str]
     reply_sentiment: Optional[str]
     notes: Optional[str]
+    last_email_subject: Optional[str] = None
+    last_email_body: Optional[str] = None
+    company_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    paraphrase_seed: int = 0
 
 
 class LeadStore:
@@ -55,6 +69,11 @@ class LeadStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     website TEXT NOT NULL,
                     contact_email TEXT,
+                    store_name TEXT,
+                    owner_name TEXT,
+                    company_name TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
                     status TEXT NOT NULL DEFAULT 'new',
                     first_contacted_date TEXT,
                     last_contacted_date TEXT,
@@ -62,14 +81,40 @@ class LeadStore:
                     reply_text TEXT,
                     reply_sentiment TEXT,
                     notes TEXT,
+                    last_email_subject TEXT,
+                    last_email_body TEXT,
+                    paraphrase_seed INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads (status);
                 CREATE INDEX IF NOT EXISTS idx_leads_email ON leads (contact_email);
                 CREATE INDEX IF NOT EXISTS idx_leads_website ON leads (website);
             """)
+            
+            # Add new columns if they don't exist (for existing databases)
+            for col in ['last_email_subject', 'last_email_body', 'company_name', 'first_name', 'last_name', 'updated_at', 'store_name', 'owner_name', 'paraphrase_seed']:
+                try:
+                    conn.execute(f"ALTER TABLE leads ADD COLUMN {col} TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+            
+            # paraphrase_seed needs to be integer
+            try:
+                conn.execute("ALTER TABLE leads ADD COLUMN paraphrase_seed INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
-    def add_lead(self, website: str, contact_email: str = "") -> int:
+    def add_lead(
+        self,
+        website: str,
+        contact_email: str = "",
+        store_name: str = "",
+        owner_name: str = "",
+        company_name: str = "",
+        first_name: str = "",
+        last_name: str = "",
+        paraphrase_seed: int = 0
+    ) -> int:
         """Add a new lead or return existing lead ID. Returns the lead ID."""
         website = website.strip().lower()
         if not website.startswith(("http://", "https://")):
@@ -85,9 +130,9 @@ class LeadStore:
 
             # Insert new lead
             cursor = conn.execute(
-                """INSERT INTO leads (website, contact_email, status, created_at)
-                   VALUES (?, ?, 'new', ?)""",
-                (website, contact_email or None, datetime.now(timezone.utc).isoformat())
+                """INSERT INTO leads (website, contact_email, store_name, owner_name, company_name, first_name, last_name, status, paraphrase_seed, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)""",
+                (website, contact_email or None, store_name or None, owner_name or None, company_name or None, first_name or None, last_name or None, paraphrase_seed, datetime.now(timezone.utc).isoformat())
             )
             return cursor.lastrowid
 
@@ -98,7 +143,9 @@ class LeadStore:
         contact_email: str = None,
         reply_text: str = None,
         reply_sentiment: str = None,
-        notes: str = None
+        notes: str = None,
+        email_subject: str = None,
+        email_body: str = None
     ) -> None:
         """Update lead status and optional fields."""
         with self._get_connection() as conn:
@@ -131,8 +178,20 @@ class LeadStore:
                 updates.append("notes = ?")
                 params.append(notes)
 
+            if email_subject is not None:
+                updates.append("last_email_subject = ?")
+                params.append(email_subject)
+
+            if email_body is not None:
+                updates.append("last_email_body = ?")
+                params.append(email_body)
+
             if status.startswith("follow_up_"):
                 updates.append("follow_up_count = follow_up_count + 1")
+
+            # Always update the updated_at timestamp
+            updates.append("updated_at = ?")
+            params.append(now)
 
             params.append(lead_id)
 
@@ -148,11 +207,51 @@ class LeadStore:
             row = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
             return self._row_to_lead(row) if row else None
 
+    def get_lead_by_website(self, website: str) -> Optional[Lead]:
+        """Get a lead by website URL.
+        
+        Args:
+            website: Website URL to search for
+            
+        Returns:
+            Lead object if found, None otherwise
+        """
+        website = website.strip().lower()
+        if not website.startswith(("http://", "https://")):
+            website = "https://" + website
+            
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM leads WHERE website = ?", (website,)).fetchone()
+            return self._row_to_lead(row) if row else None
+
+    def get_lead_by_email(self, email: str) -> Optional[Lead]:
+        """Get a lead by email address.
+        
+        Args:
+            email: Email address to search for
+            
+        Returns:
+            Lead object if found, None otherwise
+        """
+        email = email.strip().lower()
+        
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM leads WHERE contact_email = ?", (email,)).fetchone()
+            return self._row_to_lead(row) if row else None
+
     def get_leads_by_status(self, status: str) -> list[Lead]:
         """Get all leads with a specific status."""
         with self._get_connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM leads WHERE status = ? ORDER BY created_at", (status,)
+            ).fetchall()
+            return [self._row_to_lead(row) for row in rows]
+
+    def get_leads_by_email(self, email: str) -> list[Lead]:
+        """Get all leads with a specific contact email."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM leads WHERE contact_email = ? ORDER BY created_at", (email.lower(),)
             ).fetchall()
             return [self._row_to_lead(row) for row in rows]
 
@@ -198,7 +297,7 @@ class LeadStore:
 
             return stats
 
-    def get_leads_for_followup(self, days: int = 3) -> list[Lead]:
+    def get_leads_for_followup(self, days: int = 2) -> list[Lead]:
         """Get leads eligible for follow-up.
         
         Args:
@@ -213,12 +312,12 @@ class LeadStore:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             cutoff_str = cutoff.isoformat()
             
-            # Get leads in 'sent' status older than specified days with no reply
+            # Get leads in 'sent' or 'follow_up_1' status older than specified days with no reply
             # and follow_up_count < 2 (max 2 follow-ups)
             rows = conn.execute(
                 """
                 SELECT * FROM leads 
-                WHERE status = 'sent' 
+                WHERE status IN ('sent', 'follow_up_1') 
                 AND last_contacted_date IS NOT NULL
                 AND last_contacted_date <= ?
                 AND follow_up_count < 2
@@ -235,6 +334,8 @@ class LeadStore:
             id=row["id"],
             website=row["website"],
             contact_email=row["contact_email"] or "",
+            store_name=row["store_name"] or "",
+            owner_name=row["owner_name"] or "",
             status=row["status"],
             first_contacted_date=row["first_contacted_date"],
             last_contacted_date=row["last_contacted_date"],
@@ -242,6 +343,12 @@ class LeadStore:
             reply_text=row["reply_text"],
             reply_sentiment=row["reply_sentiment"],
             notes=row["notes"],
+            last_email_subject=row["last_email_subject"],
+            last_email_body=row["last_email_body"],
+            company_name=row["company_name"],
+            first_name=row["first_name"],
+            last_name=row["last_name"],
+            paraphrase_seed=row["paraphrase_seed"] if "paraphrase_seed" in row.keys() else 0,
         )
 
     def _get_first_contacted(self, lead_id: int) -> Optional[str]:

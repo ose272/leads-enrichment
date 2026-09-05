@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.tracker import LeadStore
 from src.main import (
-    run_draft_phase, run_send_phase,
+    run_scrape_phase, run_draft_phase, run_send_phase,
     run_reply_phase, run_followup_phase, run_report_phase
 )
 
@@ -90,10 +90,10 @@ def load_leads_df():
     """Load all leads as DataFrame"""
     conn = get_connection()
     df = pd.read_sql_query("""
-        SELECT id, website, contact_email, store_name, owner_name, status, follow_up_count,
+        SELECT id, website, contact_email, status, follow_up_count,
                last_contacted_date, first_contacted_date, reply_sentiment,
                created_at, updated_at,
-               last_email_subject, last_email_body, notes, paraphrase_seed
+               last_email_subject, last_email_body, notes
         FROM leads
         ORDER BY created_at DESC
     """, conn)
@@ -116,8 +116,8 @@ def load_stats():
     
     # Recent activity (last 7 days)
     week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-    stats['recent_drafted'] = conn.execute(
-        "SELECT COUNT(*) FROM leads WHERE updated_at >= ? AND status IN ('drafted', 'sent', 'replied', 'follow_up_1', 'follow_up_2')",
+    stats['recent_scraped'] = conn.execute(
+        "SELECT COUNT(*) FROM leads WHERE updated_at >= ? AND status IN ('scraped', 'drafted', 'sent', 'replied', 'follow_up_1', 'follow_up_2')",
         (week_ago,)
     ).fetchone()[0]
     stats['recent_sent'] = conn.execute(
@@ -172,28 +172,28 @@ with st.sidebar:
 # ============================================================
 
 if page == "📤 Upload Leads":
-    st.header("📤 Upload Shopify Store Leads (CSV)")
+    st.header("📤 Upload Leads (CSV)")
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.markdown("""
-        **Upload a CSV file with Shopify store owners.** Required column: `email`
+        **Upload a CSV file with leads.** Required column: `website`
         
-        Optional columns: `store_name`, `owner_name`, `website`, `context`, `paraphrase_seed`
+        Optional columns: `company_name`, `first_name`, `last_name`, `contact_email`
         
         Example format:
         ```csv
-        email,store_name,owner_name,website,context,paraphrase_seed
-        john@fitnessgearpro.com,Fitness Gear Pro,John Smith,https://fitnessgearpro.com,"Sells premium fitness equipment",0
-        sarah@cozyhomegoods.com,Cozy Home Goods,Sarah Johnson,https://cozyhomegoods.com,"Home decor store",1
+        website,company_name,first_name,last_name,contact_email
+        https://stripe.com,Stripe,John,Doe,
+        https://vercel.com,Vercel,Jane,Smith,jane@vercel.com
         ```
         """)
         
         uploaded_file = st.file_uploader(
             "Choose CSV file",
             type=["csv"],
-            help="Upload a CSV with at least an 'email' column"
+            help="Upload a CSV with at least a 'website' column"
         )
         
         if uploaded_file:
@@ -206,8 +206,8 @@ if page == "📤 Upload Leads":
                 st.dataframe(df.head(10), use_container_width=True)
                 
                 # Validate required column
-                if 'email' not in df.columns:
-                    st.error("❌ CSV must contain an 'email' column")
+                if 'website' not in df.columns:
+                    st.error("❌ CSV must contain a 'website' column")
                 else:
                     if st.button("💾 Import to Database", type="primary", use_container_width=True):
                         with st.spinner("Importing leads..."):
@@ -216,36 +216,28 @@ if page == "📤 Upload Leads":
                             skipped = 0
                             
                             for _, row in df.iterrows():
-                                email = str(row.get('email', '')).strip().lower()
-                                if not email:
+                                website = str(row.get('website', '')).strip()
+                                if not website:
                                     continue
                                 
-                                # Check if exists by email
-                                existing = store.get_lead_by_email(email)
+                                # Normalize URL
+                                if not website.startswith(('http://', 'https://')):
+                                    website = 'https://' + website
+                                
+                                # Check if exists
+                                existing = store.get_lead_by_website(website)
                                 if existing:
                                     skipped += 1
                                     continue
                                 
-                                # Get optional fields
-                                store_name = str(row.get('store_name', '')).strip() or None
-                                owner_name = str(row.get('owner_name', '')).strip() or None
-                                website = str(row.get('website', '')).strip() or None
-                                context = str(row.get('context', '')).strip() or None
-                                paraphrase_seed = int(row.get('paraphrase_seed', 0)) if pd.notna(row.get('paraphrase_seed')) else 0
-                                
-                                # Normalize website
-                                if website and not website.startswith(('http://', 'https://')):
-                                    website = 'https://' + website
-                                
                                 # Add lead
-                                lead_id = store.add_lead(
-                                    website=website or f"shopify-{email.split('@')[0]}",
-                                    contact_email=email,
-                                    store_name=store_name or "",
-                                    owner_name=owner_name or "",
-                                    paraphrase_seed=paraphrase_seed
+                                store.add_lead(
+                                    website=website,
+                                    company_name=str(row.get('company_name', '')).strip() or None,
+                                    first_name=str(row.get('first_name', '')).strip() or None,
+                                    last_name=str(row.get('last_name', '')).strip() or None,
+                                    contact_email=str(row.get('contact_email', '')).strip() or None
                                 )
-                                
                                 imported += 1
                             
                             st.success(f"✅ Imported {imported} new leads, skipped {skipped} duplicates")
@@ -258,23 +250,22 @@ if page == "📤 Upload Leads":
     with col2:
         st.subheader("📋 Template")
         template_df = pd.DataFrame({
-            'email': ['john@fitnessgearpro.com', 'sarah@cozyhomegoods.com', 'mike@techgadgetstore.com'],
-            'store_name': ['Fitness Gear Pro', 'Cozy Home Goods', 'Tech Gadget Store'],
-            'owner_name': ['John Smith', 'Sarah Johnson', 'Mike Chen'],
-            'website': ['https://fitnessgearpro.com', 'https://cozyhomegoods.com', 'https://techgadgetstore.com'],
-            'context': ['Sells premium fitness equipment', 'Home decor and furniture', 'Electronics and accessories'],
-            'paraphrase_seed': [0, 1, 0]
+            'website': ['https://stripe.com', 'https://vercel.com', 'https://linear.app'],
+            'company_name': ['Stripe', 'Vercel', 'Linear'],
+            'first_name': ['John', 'Jane', 'Bob'],
+            'last_name': ['Doe', 'Smith', 'Wilson'],
+            'contact_email': ['', 'jane@vercel.com', '']
         })
         csv = template_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             "📥 Download Template CSV",
             data=csv,
-            file_name="shopify_leads_template.csv",
+            file_name="leads_template.csv",
             mime="text/csv",
             use_container_width=True
         )
         
-        st.info("💡 Tip: Add paraphrase_seed (0, 1, 2...) to generate different email variations for A/B testing.")
+        st.info("💡 Tip: If you have email addresses, include them to skip scraping.")
 
 elif page == "📊 Pipeline Overview":
     st.header("📊 Pipeline Overview")
@@ -321,7 +312,7 @@ elif page == "📊 Pipeline Overview":
     with col2:
         has_email = st.selectbox("Email Status", ["All", "Has Email", "No Email"])
     with col3:
-        search = st.text_input("🔍 Search store name/website")
+        search = st.text_input("🔍 Search website/company")
     
     # Apply filters
     filtered_df = df.copy()
@@ -333,9 +324,7 @@ elif page == "📊 Pipeline Overview":
         filtered_df = filtered_df[filtered_df['contact_email'].isna() | (filtered_df['contact_email'] == '')]
     if search:
         filtered_df = filtered_df[
-            filtered_df['store_name'].str.contains(search, case=False, na=False) |
-            filtered_df['website'].str.contains(search, case=False, na=False) |
-            filtered_df['owner_name'].str.contains(search, case=False, na=False)
+            filtered_df['website'].str.contains(search, case=False, na=False)
         ]
     
     # Display table
@@ -353,13 +342,12 @@ elif page == "📊 Pipeline Overview":
         
         # Truncate long fields
         display_df['website'] = display_df['website'].apply(lambda x: x[:50] + '...' if len(str(x)) > 50 else x)
-        display_df['store_name'] = display_df['store_name'].apply(lambda x: x[:40] + '...' if len(str(x)) > 40 else x)
         display_df['last_email_subject'] = display_df['last_email_subject'].apply(
             lambda x: (x[:40] + '...') if x and len(str(x)) > 40 else (x or '')
         )
         
         # Select columns to show
-        show_cols = ['id', 'store_name', 'owner_name', 'website', 'contact_email', 'status', 'follow_up_count', 
+        show_cols = ['id', 'website', 'contact_email', 'status', 'follow_up_count', 
                      'last_contacted_date', 'reply_sentiment', 'last_email_subject', 'created_at']
         display_df = display_df[show_cols]
         
@@ -394,7 +382,7 @@ elif page == "📧 Email Tracking":
         # Email detail table
         st.subheader("Email History")
         
-        display_cols = ['id', 'store_name', 'owner_name', 'website', 'contact_email', 'status', 'follow_up_count',
+        display_cols = ['id', 'website', 'contact_email', 'status', 'follow_up_count',
                         'last_contacted_date', 'reply_sentiment', 'last_email_subject']
         st.dataframe(email_df[display_cols], use_container_width=True, hide_index=True)
         
@@ -403,7 +391,7 @@ elif page == "📧 Email Tracking":
         st.subheader("📖 View Email Content")
         
         lead_ids = email_df['id'].tolist()
-        selected_id = st.selectbox("Select Lead", lead_ids, format_func=lambda x: f"Lead #{x} - {email_df[email_df['id']==x]['store_name'].values[0]}")
+        selected_id = st.selectbox("Select Lead", lead_ids, format_func=lambda x: f"Lead #{x} - {email_df[email_df['id']==x]['website'].values[0]}")
         
         if selected_id:
             lead = email_df[email_df['id'] == selected_id].iloc[0]
@@ -444,12 +432,10 @@ elif page == "🔄 Follow-ups":
             
             next_followup = "Follow-up #1" if lead['status'] == 'sent' else "Follow-up #2"
             
-            with st.expander(f"Lead #{lead['id']} - {lead['store_name']} ({next_followup}) - {days_since} days ago"):
+            with st.expander(f"Lead #{lead['id']} - {lead['website']} ({next_followup}) - {days_since} days ago"):
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**Email:** {lead['contact_email']}")
-                    st.write(f"**Store:** {lead['store_name']}")
-                    st.write(f"**Owner:** {lead['owner_name']}")
                     st.write(f"**Status:** {lead['status']}")
                     st.write(f"**Follow-up Count:** {lead['follow_up_count']}")
                     st.write(f"**Last Contacted:** {lead['last_contacted_date']}")
@@ -524,211 +510,3 @@ elif page == "💬 Replies & Sentiment":
                 st.success(f"Reply check complete: {result} replies processed")
                 st.cache_data.clear()
                 st.rerun()
-elif page == "📈 Reports":
-    st.header("📈 Reports & Analytics")
-    
-    tab1, tab2, tab3 = st.tabs(["📊 Weekly Report", "📈 Trends", "📥 Export Data"])
-    
-    with tab1:
-        st.subheader("Weekly Outreach Report")
-        
-        if st.button("📋 Generate Weekly Report", type="primary"):
-            with st.spinner("Generating report..."):
-                store = get_store()
-                result = run_report_phase(store)
-                st.success("Report generated!")
-                
-                try:
-                    report_df = pd.read_csv("weekly_report.csv")
-                    st.dataframe(report_df, use_container_width=True, hide_index=True)
-                    
-                    import os
-                    if os.path.exists("weekly_report.html"):
-                        with open("weekly_report.html", "r") as f:
-                            html_content = f.read()
-                        st.components.v1.html(html_content, height=600, scrolling=True)
-                except Exception as e:
-                    st.error(f"Error loading report: {e}")
-        
-        st.divider()
-        
-        try:
-            report_df = pd.read_csv("weekly_report.csv")
-            st.caption("Latest Generated Report")
-            st.dataframe(report_df, use_container_width=True, hide_index=True)
-        except:
-            st.caption("No report generated yet. Click 'Generate Weekly Report' above.")
-    
-    with tab2:
-        st.subheader("Pipeline Trends")
-        
-        conn = get_connection()
-        
-        daily_activity = pd.read_sql_query("""
-            SELECT date(created_at) as date, COUNT(*) as new_leads
-            FROM leads
-            WHERE created_at >= date('now', '-30 days')
-            GROUP BY date(created_at)
-            ORDER BY date
-        """, conn)
-        
-        if not daily_activity.empty:
-            st.line_chart(daily_activity.set_index('date'))
-        else:
-            st.info("Not enough data for trends yet.")
-        
-        st.subheader("Status Distribution")
-        status_dist = pd.read_sql_query("""
-            SELECT status, COUNT(*) as count
-            FROM leads
-            GROUP BY status
-        """, conn)
-        if not status_dist.empty:
-            st.bar_chart(status_dist.set_index('status'))
-        
-        conn.close()
-    with tab3:
-        st.subheader("Export Data")
-        
-        df = load_leads_df()
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download All Leads (CSV)",
-                data=csv,
-                file_name=f"leads_export_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        with col2:
-            statuses = st.multiselect("Filter by status", df['status'].unique().tolist())
-            if statuses:
-                filtered = df[df['status'].isin(statuses)]
-                csv = filtered.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    f"📥 Download Filtered ({len(filtered)} leads)",
-                    data=csv,
-                    file_name=f"leads_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-
-elif page == "⚙️ Actions":
-    st.header("⚙️ Manual Actions & System Controls")
-    
-    st.warning("⚠️ These actions run the actual outreach pipeline phases. Use with real credentials.")
-    
-    store = get_store()
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Individual Phases")
-        
-        if st.button("✍️ Draft Emails", use_container_width=True):
-            with st.spinner("Drafting emails with LLM..."):
-                result = run_draft_phase(store)
-                st.success(f"Drafted {result} emails")
-                st.cache_data.clear()
-                st.rerun()
-        
-        if st.button("📤 Send Emails", use_container_width=True):
-            with st.spinner("Sending emails via SMTP..."):
-                result = run_send_phase(store)
-                st.success(f"Sent {result} emails")
-                st.cache_data.clear()
-                st.rerun()
-        
-        if st.button("📬 Check Replies", use_container_width=True):
-            with st.spinner("Checking IMAP for replies..."):
-                result = run_reply_phase(store)
-                st.success(f"Processed {result} replies")
-                st.cache_data.clear()
-                st.rerun()
-        
-        if st.button("🔄 Send Follow-ups", use_container_width=True):
-            with st.spinner("Sending follow-ups..."):
-                result = run_followup_phase(store)
-                st.success(f"Sent {result} follow-ups")
-                st.cache_data.clear()
-                st.rerun()
-        
-        if st.button("📊 Generate Report", use_container_width=True):
-            with st.spinner("Generating weekly report..."):
-                result = run_report_phase(store)
-                st.success("Report generated!")
-                st.cache_data.clear()
-                st.rerun()
-    
-    with col2:
-        st.subheader("Full Daily Cycle")
-        
-        if st.button("🚀 RUN FULL DAILY CYCLE", type="primary", use_container_width=True):
-            with st.spinner("Running full daily outreach cycle..."):
-                progress = st.progress(0)
-                status = st.empty()
-                
-                phases = [
-                    ("Drafting emails...", run_draft_phase),
-                    ("Sending emails...", run_send_phase),
-                    ("Checking replies...", run_reply_phase),
-                    ("Sending follow-ups...", run_followup_phase),
-                ]
-                
-                results = {}
-                for i, (msg, func) in enumerate(phases):
-                    status.text(msg)
-                    try:
-                        results[msg] = func(store)
-                    except Exception as e:
-                        results[msg] = f"Error: {e}"
-                    progress.progress((i + 1) / len(phases))
-                
-                status.text("✅ Daily cycle complete!")
-                
-                st.json(results)
-                st.cache_data.clear()
-                st.rerun()
-        
-        st.divider()
-        
-        st.subheader("System Info")
-        
-        conn = get_connection()
-        db_size = Path(DB_PATH).stat().st_size / 1024
-        st.write(f"**Database:** {DB_PATH} ({db_size:.1f} KB)")
-        
-        table_counts = {}
-        for table in ['leads', 'scrape_log']:
-            try:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                table_counts[table] = count
-            except:
-                table_counts[table] = 0
-        
-        st.write(f"**Leads table:** {table_counts.get('leads', 0)} rows")
-        st.write(f"**Scrape log:** {table_counts.get('scrape_log', 0)} rows")
-        
-        conn.close()
-        
-        st.subheader("Environment Check")
-        import os
-        env_vars = [
-            'GROQ_API_KEY', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER',
-            'IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'SENDER_EMAIL', 'WHATSAPP_LINK'
-        ]
-        
-        for var in env_vars:
-            value = os.getenv(var)
-            status = "✅ Set" if value else "❌ Missing"
-            if value and var.endswith(('_KEY', '_PASSWORD', '_PASS')):
-                display = value[:4] + "****" + value[-4:] if len(value) > 8 else "****"
-            else:
-                display = value or ""
-            st.write(f"**{var}:** {status} {display}")
-
-# Footer
-st.divider()
-st.caption(f"SE Global Outreach Dashboard • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} • DB: {DB_PATH}")

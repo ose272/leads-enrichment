@@ -1,0 +1,63 @@
+elif page == "📈 Reports":
+    st.header("📈 Reports & Analytics")
+    
+    tab1, tab2, tab3 = st.tabs(["📊 Weekly Report", "📈 Trends", "📥 Export Data"])
+    
+    with tab1:
+        st.subheader("Weekly Outreach Report")
+        
+        if st.button("📋 Generate Weekly Report", type="primary"):
+            with st.spinner("Generating report..."):
+                store = get_store()
+                result = run_report_phase(store)
+                st.success("Report generated!")
+                
+                try:
+                    report_df = pd.read_csv("weekly_report.csv")
+                    st.dataframe(report_df, use_container_width=True, hide_index=True)
+                    
+                    import os
+                    if os.path.exists("weekly_report.html"):
+                        with open("weekly_report.html", "r") as f:
+                            html_content = f.read()
+                        st.components.v1.html(html_content, height=600, scrolling=True)
+                except Exception as e:
+                    st.error(f"Error loading report: {e}")
+        
+        st.divider()
+        
+        try:
+            report_df = pd.read_csv("weekly_report.csv")
+            st.caption("Latest Generated Report")
+            st.dataframe(report_df, use_container_width=True, hide_index=True)
+        except:
+            st.caption("No report generated yet. Click 'Generate Weekly Report' above.")
+    
+    with tab2:
+        st.subheader("Pipeline Trends")
+        
+        conn = get_connection()
+        
+        daily_activity = pd.read_sql_query("""
+            SELECT date(created_at) as date, COUNT(*) as new_leads
+            FROM leads
+            WHERE created_at >= date('now', '-30 days')
+            GROUP BY date(created_at)
+            ORDER BY date
+        """, conn)
+        
+        if not daily_activity.empty:
+            st.line_chart(daily_activity.set_index('date'))
+        else:
+            st.info("Not enough data for trends yet.")
+        
+        st.subheader("Status Distribution")
+        status_dist = pd.read_sql_query("""
+            SELECT status, COUNT(*) as count
+            FROM leads
+            GROUP BY status
+        """, conn)
+        if not status_dist.empty:
+            st.bar_chart(status_dist.set_index('status'))
+        
+        conn.close()

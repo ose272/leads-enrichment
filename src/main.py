@@ -1,10 +1,11 @@
-"""Main orchestration module for the Outreach Agent.
+"""Main orchestration module for the Outreach Agent (Shopify AI Agents).
 
 Modes:
-- --mode daily: Run daily outreach cycle (scrape, draft, send, check replies, follow-ups)
+- --mode daily: Run daily outreach cycle (draft, send, check replies, follow-ups)
 - --mode report: Generate weekly report
-- --mode scrape: Only scrape emails for new leads
-- --mode upload: Upload CSV of websites
+- --mode draft: Only draft emails for new leads
+- --mode send: Only send drafted emails
+- --mode upload: Upload CSV of Shopify store owners (with emails)
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from src.tracker import LeadStore
-from src.scraper import scrape_email, scrape_website_content
 from src.drafter import draft_email, draft_followup
 from src.mailer import send_email, check_replies
 from src.reporter import run_weekly_report
@@ -36,10 +36,18 @@ LOGGER = logging.getLogger("main")
 
 
 def load_csv(filepath: str, store: LeadStore) -> int:
-    """Load websites from CSV and add to leads table.
+    """Load Shopify store owners from CSV and add to leads table.
+    
+    Expected CSV columns:
+    - email (required): Store owner's email
+    - store_name (optional): Shopify store name
+    - owner_name (optional): Store owner's name
+    - website (optional): Store URL
+    - context (optional): Additional notes/context
+    - paraphrase_seed (optional): Seed for email variation (default 0)
     
     Args:
-        filepath: Path to CSV file with 'website' column
+        filepath: Path to CSV file
         store: LeadStore instance
         
     Returns:
@@ -53,110 +61,104 @@ def load_csv(filepath: str, store: LeadStore) -> int:
     
     df = pd.read_csv(filepath)
     
-    if "website" not in df.columns:
-        LOGGER.error("CSV must have a 'website' column")
+    if "email" not in df.columns:
+        LOGGER.error("CSV must have an 'email' column")
         return 0
     
-    # Clean and validate URLs
-    websites = df["website"].dropna().astype(str).str.strip().str.lower()
-    websites = websites[websites != ""]
-    
-    # Add https:// if missing
-    def normalize_url(url: str) -> str:
-        if not url.startswith(("http://", "https://")):
-            return "https://" + url
-        return url
-    
-    websites = websites.apply(normalize_url)
-    websites = websites.drop_duplicates()
+    # Clean data
+    df = df.dropna(subset=["email"])
+    df["email"] = df["email"].astype(str).str.strip().str.lower()
+    df = df[df["email"] != ""]
+    df = df.drop_duplicates(subset=["email"])
     
     added = 0
-    for website in websites:
+    for _, row in df.iterrows():
         try:
-            lead_id = store.add_lead(website)
+            email = row["email"]
+            store_name = str(row.get("store_name", "")).strip() if pd.notna(row.get("store_name")) else ""
+            owner_name = str(row.get("owner_name", "")).strip() if pd.notna(row.get("owner_name")) else ""
+            website = str(row.get("website", "")).strip() if pd.notna(row.get("website")) else ""
+            context = str(row.get("context", "")).strip() if pd.notna(row.get("context")) else ""
+            paraphrase_seed = int(row.get("paraphrase_seed", 0)) if pd.notna(row.get("paraphrase_seed")) else 0
+            
+            # Normalize website
+            if website and not website.startswith(("http://", "https://")):
+                website = "https://" + website
+            
+            lead_id = store.add_lead(
+                website=website or f"shopify-{email.split('@')[0]}",
+                contact_email=email,
+                store_name=store_name,
+                owner_name=owner_name,
+                paraphrase_seed=paraphrase_seed
+            )
             if lead_id:
                 added += 1
+                LOGGER.info("Added lead: %s (%s)", email, store_name)
         except Exception as e:
-            LOGGER.warning("Failed to add %s: %s", website, e)
+            LOGGER.warning("Failed to add %s: %s", row.get("email", "unknown"), e)
     
-    LOGGER.info("Loaded CSV: %d new leads added from %d unique websites", added, len(websites))
+    LOGGER.info("Loaded CSV: %d new leads added from %d unique emails", added, len(df))
     return added
 
 
-def run_scrape_phase(store: LeadStore) -> int:
-    """Scrape emails for leads with status 'new'.
-    
-    Returns:
-        Number of leads scraped
-    """
-    leads = store.get_leads_by_status("new")
-    scraped = 0
-    
-    for lead in leads:
-        LOGGER.info("Scraping email for %s", lead.website)
-        
-        try:
-            # Try to get email and business context
-            summary, emails = scrape_website_content(lead.website)
-            
-            if emails:
-                email = emails[0]
-                store.update_status(lead.id, "scraped", contact_email=email, notes=summary[:500])
-                LOGGER.info("Found email for %s: %s", lead.website, email)
-            else:
-                # No email found, but we have context
-                store.update_status(lead.id, "scraped", notes=summary[:500])
-                LOGGER.info("No email found for %s, but got context", lead.website)
-            
-            scraped += 1
-            
-        except Exception as e:
-            LOGGER.error("Error scraping %s: %s", lead.website, e)
-            store.update_status(lead.id, "scraped", notes=f"Scrape error: {e}")
-    
-    return scraped
-
-
 def run_draft_phase(store: LeadStore) -> int:
-    """Draft emails for scraped leads with emails.
+    """Draft emails for leads with status 'new' that have emails.
     
     Returns:
         Number of emails drafted
     """
-    leads = store.get_leads_by_status("scraped")
+    leads = store.get_leads_by_status("new")
     drafted = 0
     
     for lead in leads:
         if not lead.contact_email:
-            LOGGER.info("Lead %d has no email, skipping draft", lead.id)
+            LOGGER.info("Skipping lead %d - no email", lead.id)
             continue
-        
-        LOGGER.info("Drafting email for %s", lead.website)
+            
+        LOGGER.info("Drafting email for %s (%s)", lead.store_name or lead.contact_email, lead.contact_email)
         
         try:
-            # Use the scraped context for personalization
-            draft = draft_email(lead.website, lead.notes or f"Website: {lead.website}")
+            # Build context from available info
+            context_parts = []
+            if lead.store_name:
+                context_parts.append(f"Store: {lead.store_name}")
+            if lead.owner_name:
+                context_parts.append(f"Owner: {lead.owner_name}")
+            if lead.notes:
+                context_parts.append(f"Notes: {lead.notes}")
+            context = "\n".join(context_parts)
+            
+            # Use paraphrase_seed from lead for variation
+            paraphrase_seed = getattr(lead, 'paraphrase_seed', 0) or 0
+            
+            draft = draft_email(
+                email=lead.contact_email,
+                store_name=lead.store_name,
+                owner_name=lead.owner_name,
+                context=context,
+                paraphrase_seed=paraphrase_seed
+            )
             
             if draft:
-                # Store draft in notes for now (could add separate fields)
                 store.update_status(
-                    lead.id, 
-                    "drafted", 
-                    notes=f"Subject: {draft.subject}\n\n{draft.body}"
+                    lead.id, "drafted", 
+                    email_subject=draft.subject, 
+                    email_body=draft.body
                 )
                 drafted += 1
-                LOGGER.info("Drafted email for %s: %s", lead.website, draft.subject[:50])
+                LOGGER.info("Drafted email for %s: %s", lead.contact_email, draft.subject[:50])
             else:
-                LOGGER.warning("Failed to draft email for %s", lead.website)
+                LOGGER.warning("Failed to draft email for %s", lead.contact_email)
                 
         except Exception as e:
-            LOGGER.error("Error drafting for %s: %s", lead.website, e)
+            LOGGER.error("Error drafting email for %s: %s", lead.contact_email, e)
     
     return drafted
 
 
 def run_send_phase(store: LeadStore) -> int:
-    """Send drafted emails.
+    """Send emails for leads with status 'drafted'.
     
     Returns:
         Number of emails sent
@@ -166,38 +168,41 @@ def run_send_phase(store: LeadStore) -> int:
     
     for lead in leads:
         if not lead.contact_email:
+            LOGGER.warning("Lead %d has no contact email", lead.id)
             continue
-        
-        # Parse subject and body from notes
-        notes = lead.notes or ""
-        lines = notes.split("\n")
-        subject = ""
-        body = ""
-        
-        if lines and lines[0].startswith("Subject: "):
-            subject = lines[0][9:]
-            body = "\n".join(lines[2:])  # Skip empty line
-        
-        if not subject or not body:
-            LOGGER.warning("Invalid draft for lead %d", lead.id)
+            
+        if not lead.last_email_subject or not lead.last_email_body:
+            LOGGER.warning("Lead %d missing draft content", lead.id)
             continue
         
         LOGGER.info("Sending email to %s", lead.contact_email)
         
         try:
-            success = send_email(lead.contact_email, subject, body)
-            
+            success = send_email(lead.contact_email, lead.last_email_subject, lead.last_email_body)
             if success:
-                store.update_status(lead.id, "sent")
+                store.update_status(
+                    lead.id, "sent", 
+                    email_subject=lead.last_email_subject, 
+                    email_body=lead.last_email_body
+                )
                 sent += 1
                 LOGGER.info("Sent email to %s", lead.contact_email)
             else:
                 LOGGER.error("Failed to send email to %s", lead.contact_email)
                 
         except Exception as e:
-            LOGGER.error("Error sending to %s: %s", lead.contact_email, e)
+            LOGGER.error("Error sending email to %s: %s", lead.contact_email, e)
     
     return sent
+
+
+def run_reply_phase(store: LeadStore) -> int:
+    """Check for replies and update lead statuses.
+
+    Returns:
+        Number of replies processed
+    """
+    return check_replies(store)
 
 
 def run_followup_phase(store: LeadStore) -> int:
@@ -206,35 +211,65 @@ def run_followup_phase(store: LeadStore) -> int:
     Returns:
         Number of follow-ups sent
     """
-    # Get leads in 'sent' status older than 3 days with no reply
-    leads = store.get_leads_for_followup(days=3)
+    # Get leads in 'sent' or 'follow_up_1' status older than 2 days with no reply
+    leads = store.get_leads_for_followup(days=2)
     sent = 0
     
     for lead in leads:
         if not lead.contact_email:
             continue
             
-        LOGGER.info("Sending follow-up to %s (%s)", lead.contact_email, lead.website)
+        # Determine follow-up number (1 or 2)
+        followup_number = lead.follow_up_count + 1
+        
+        LOGGER.info("Sending follow-up #%d to %s (%s)", followup_number, lead.contact_email, lead.store_name)
         
         try:
-            followup = draft_followup(lead.website, lead.notes or "")
+            # Use stored email subject/body for reference
+            previous_subject = lead.last_email_subject or ""
+            previous_body = lead.last_email_body or ""
+            
+            paraphrase_seed = getattr(lead, 'paraphrase_seed', 0) or 0
+            
+            followup = draft_followup(
+                email=lead.contact_email,
+                store_name=lead.store_name,
+                previous_subject=previous_subject,
+                previous_body=previous_body,
+                followup_number=followup_number,
+                paraphrase_seed=paraphrase_seed
+            )
             
             if followup:
                 success = send_email(lead.contact_email, followup.subject, followup.body)
                 if success:
-                    store.update_status(lead.id, "followup_sent")
+                    # Update status to follow_up_1 or follow_up_2
+                    new_status = "follow_up_1" if followup_number == 1 else "follow_up_2"
+                    store.update_status(lead.id, new_status, email_subject=followup.subject, email_body=followup.body)
                     sent += 1
-                    LOGGER.info("Sent follow-up to %s", lead.contact_email)
+                    LOGGER.info("Sent follow-up #%d to %s", followup_number, lead.contact_email)
                 else:
-                    LOGGER.error("Failed to send follow-up to %s", lead.contact_email)
+                    LOGGER.error("Failed to send follow-up #%d to %s", followup_number, lead.contact_email)
             else:
-                LOGGER.warning("Failed to draft follow-up for lead %d", lead.id)
+                LOGGER.warning("Failed to draft follow-up #%d for lead %d", followup_number, lead.id)
                 
         except Exception as e:
-            LOGGER.error("Error sending follow-up to %s: %s", lead.contact_email, e)
+            LOGGER.error("Error sending follow-up #%d to %s: %s", followup_number, lead.contact_email, e)
+    
+    return sent
     
     return sent
 
+def run_report_phase(store: LeadStore) -> int:
+    """Generate weekly report.
+
+    Returns:
+        Number of leads in report
+    """
+    run_weekly_report(store)
+    # Return count of leads in the report
+    leads = store.get_leads_by_status("replied")
+    return len(leads)
 
 def run_daily_cycle(store: LeadStore) -> dict[str, int]:
     """Run the complete daily outreach cycle.
@@ -246,19 +281,16 @@ def run_daily_cycle(store: LeadStore) -> dict[str, int]:
     
     results = {}
     
-    # Phase 1: Scrape new leads
-    results["scraped"] = run_scrape_phase(store)
-    
-    # Phase 2: Draft emails
+    # Phase 1: Draft emails for new leads
     results["drafted"] = run_draft_phase(store)
     
-    # Phase 3: Send emails
+    # Phase 2: Send emails
     results["sent"] = run_send_phase(store)
     
-    # Phase 4: Check replies
+    # Phase 3: Check replies
     results["replies_processed"] = check_replies(store)
     
-    # Phase 5: Send follow-ups
+    # Phase 4: Send follow-ups
     results["followups_sent"] = run_followup_phase(store)
     
     LOGGER.info("Daily cycle complete: %s", results)
@@ -267,8 +299,8 @@ def run_daily_cycle(store: LeadStore) -> dict[str, int]:
 
 def main():
     """Main entry point with command-line argument parsing."""
-    parser = argparse.ArgumentParser(description="Outreach Agent - Automated cold outreach")
-    parser.add_argument("--mode", choices=["daily", "report", "scrape", "upload"], required=True,
+    parser = argparse.ArgumentParser(description="Outreach Agent - Shopify AI Agents Outreach")
+    parser.add_argument("--mode", choices=["daily", "report", "draft", "send", "upload"], required=True,
                         help="Mode to run")
     parser.add_argument("--csv", help="CSV file path for upload mode")
     parser.add_argument("--db", default="outreach.db", help="Database file path")
@@ -285,9 +317,13 @@ def main():
             count = load_csv(args.csv, store)
             print(f"Added {count} new leads")
             
-        elif args.mode == "scrape":
-            count = run_scrape_phase(store)
-            print(f"Scraped {count} leads")
+        elif args.mode == "draft":
+            count = run_draft_phase(store)
+            print(f"Drafted {count} emails")
+            
+        elif args.mode == "send":
+            count = run_send_phase(store)
+            print(f"Sent {count} emails")
             
         elif args.mode == "daily":
             results = run_daily_cycle(store)

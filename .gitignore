@@ -1,5 +1,35 @@
-# Streamlit
-.streamlit/secrets.toml
+# Project specific
+*.db
+*.sqlite
+*.sqlite3
+leads.db
+leads.db-shm
+leads.db-wal
+logs/
+*.log
+scrape_log.csv
+weekly_report.csv
+weekly_report.html
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Python
 __pycache__/
@@ -20,32 +50,5 @@ venv/
 env/
 ENV/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Project specific
-*.db
-*.sqlite
-*.sqlite3
-leads.db
-leads.db-shm
-leads.db-wal
-logs/
-*.log
-
-# Environment files
-.env
-.env.local
-.env.*.local
-
-# Distribution
-dist/
-build/
-*.egg-info/
+# Streamlit
+.streamlit/secrets.toml

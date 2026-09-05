@@ -1,0 +1,6 @@
+email,store_name,owner_name,website,context,paraphrase_seed
+john@fitnessgearpro.com,Fitness Gear Pro,John Smith,https://fitnessgearpro.com,"Sells premium fitness equipment, 500+ orders/month",0
+sarah@cozyhomegoods.com,Cozy Home Goods,Sarah Johnson,https://cozyhomegoods.com,"Home decor and furniture, high return rate on large items",1
+mike@techgadgetstore.com,Tech Gadget Store,Mike Chen,https://techgadgetstore.com,"Electronics and accessories, frequent inventory stockouts",0
+emma@petlovershop.com,Pet Lover's Shop,Emma Davis,https://petlovershop.com,"Pet supplies subscription, 2000+ subscribers",2
+alex@urbanfashionhub.com,Urban Fashion Hub,Alex Rodriguez,https://urbanfashionhub.com,"Streetwear brand, seasonal inventory challenges",1
