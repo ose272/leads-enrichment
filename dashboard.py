@@ -82,8 +82,40 @@ def get_store():
     return LeadStore(DB_PATH)
 
 def get_connection():
+    """Get database connection, initializing schema if needed."""
+    import os
+    db_exists = os.path.exists(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    
+    if not db_exists:
+        # Initialize schema on first run
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS leads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                website TEXT NOT NULL,
+                contact_email TEXT,
+                store_name TEXT,
+                owner_name TEXT,
+                company_name TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                status TEXT NOT NULL DEFAULT 'new',
+                first_contacted_date TEXT,
+                last_contacted_date TEXT,
+                follow_up_count INTEGER NOT NULL DEFAULT 0,
+                reply_text TEXT,
+                reply_sentiment TEXT,
+                notes TEXT,
+                last_email_subject TEXT,
+                last_email_body TEXT,
+                paraphrase_seed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    
     return conn
 
 def load_leads_df():
