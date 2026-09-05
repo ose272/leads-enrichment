@@ -80,13 +80,65 @@ def start_run(csv_path: Path, live_mode: bool) -> None:
     st.session_state.run_started = datetime.now().isoformat(timespec="seconds")
 
 
+def prepare_batch_csv(source_path: Path, batch_size: int) -> Path:
+    """Create the next unprocessed batch while retaining the full source upload."""
+    preview = pd.read_csv(source_path)
+    website_column = next(
+        (column for column in preview.columns if column.lower().strip() in ("website", "url")),
+        None,
+    )
+    email_column = next(
+        (column for column in preview.columns if column.lower().strip() in ("email", "contact_email")),
+        None,
+    )
+    if website_column is None and email_column is None:
+        raise ValueError("CSV must contain a website or email column.")
+
+    with sqlite3.connect(DB_PATH) as connection:
+        processed_websites = {
+            str(row[0]).strip().lower()
+            for row in connection.execute("SELECT website FROM leads")
+            if row[0]
+        }
+        processed_emails = {
+            str(row[0]).strip().lower()
+            for row in connection.execute(
+                "SELECT contact_email FROM leads WHERE contact_email IS NOT NULL"
+            )
+            if row[0]
+        }
+
+    selected_rows = []
+    for _, row in preview.iterrows():
+        website = str(row.get(website_column, "")).strip().lower() if website_column else ""
+        email = str(row.get(email_column, "")).strip().lower() if email_column else ""
+        if email and email in processed_emails:
+            continue
+        if not email and website:
+            normalized = website if website.startswith(("http://", "https://")) else f"https://{website}"
+            if normalized in processed_websites:
+                continue
+        if not website and not email:
+            continue
+        selected_rows.append(row)
+        if len(selected_rows) >= batch_size:
+            break
+
+    if not selected_rows:
+        raise ValueError("No unprocessed leads remain in this upload.")
+
+    batch_path = UPLOAD_DIR / f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    pd.DataFrame(selected_rows).to_csv(batch_path, index=False)
+    return batch_path
+
+
 def stage_upload(upload: object, preview: pd.DataFrame, batch_size: int) -> Path:
-    """Persist the selected batch once per uploaded file."""
+    """Persist the complete upload so unused rows remain available."""
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    signature = f"{upload.name}:{upload.size}:{batch_size}"
+    signature = f"{upload.name}:{upload.size}"
     if st.session_state.get("upload_signature") != signature:
         saved = UPLOAD_DIR / f"leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        preview.head(int(batch_size)).to_csv(saved, index=False)
+        preview.to_csv(saved, index=False)
         st.session_state.upload_signature = signature
         st.session_state.selected_csv = str(saved)
     return Path(st.session_state.selected_csv)
@@ -129,7 +181,7 @@ def main() -> None:
                 st.write(f"{len(preview)} rows loaded; the next run will use up to {batch_size}.")
                 st.dataframe(preview.head(10), use_container_width=True, hide_index=True)
                 staged = stage_upload(upload, preview, int(batch_size))
-                st.success(f"Staged {len(preview.head(int(batch_size)))} leads from `{staged.name}`.")
+                st.success(f"Stored all {len(preview)} leads in `{staged.name}`; the next run will use up to {batch_size}.")
         except Exception as exc:
             st.error(f"Could not read CSV: {exc}")
 
@@ -158,7 +210,12 @@ def main() -> None:
         elif not Path(selected_csv).is_file():
             st.error("The staged CSV is no longer available. Upload it again.")
         else:
-            start_run(Path(selected_csv), live_mode)
+            try:
+                batch_csv = prepare_batch_csv(Path(selected_csv), int(batch_size))
+            except ValueError as exc:
+                st.error(str(exc))
+                return
+            start_run(batch_csv, live_mode)
             st.success("Automation started. Use Refresh to monitor progress.")
             st.rerun()
 
