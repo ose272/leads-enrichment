@@ -117,6 +117,16 @@ def run_scrape_phase(store: LeadStore) -> int:
     scraped = 0
     
     for lead in leads:
+        if is_sendable_email(lead.contact_email):
+            store.update_status(
+                lead.id,
+                "scraped",
+                notes=f"Supplied contact email: {lead.contact_email}",
+            )
+            LOGGER.info("Using supplied email for %s; skipping website scrape", lead.contact_email)
+            scraped += 1
+            continue
+
         LOGGER.info("Scraping email for %s", lead.website)
         
         try:

@@ -143,18 +143,24 @@ def main() -> None:
         disabled=not live_mode,
     )
     if process_active:
-        st.info("Start automation is unavailable while another run is active.")
+        st.info("A run is already active. Refresh to monitor it.")
     elif not selected_csv:
-        st.info("Upload a valid CSV to enable Start automation.")
+        st.info("Upload a valid CSV before starting.")
     elif live_mode and not live_confirm:
-        st.info("Confirm live delivery to enable Start automation.")
-    if st.button(
-        "▶ Start automation",
-        type="primary",
-        disabled=process_active or not selected_csv or (live_mode and not live_confirm),
-    ):
-        start_run(Path(selected_csv), live_mode)
-        st.rerun()
+        st.info("Live mode requires delivery confirmation before starting.")
+    if st.button("▶ Start automation", type="primary"):
+        if process_active:
+            st.error("A run is already active. Wait for it to finish before starting another.")
+        elif not selected_csv:
+            st.error("Upload a valid CSV first, then click Start automation again.")
+        elif live_mode and not live_confirm:
+            st.error("Tick the live-delivery confirmation box before starting.")
+        elif not Path(selected_csv).is_file():
+            st.error("The staged CSV is no longer available. Upload it again.")
+        else:
+            start_run(Path(selected_csv), live_mode)
+            st.success("Automation started. Use Refresh to monitor progress.")
+            st.rerun()
 
     if st.button("🔄 Refresh"):
         st.rerun()
